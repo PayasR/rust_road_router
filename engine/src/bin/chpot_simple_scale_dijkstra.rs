@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _exp_ctx = exps_ctxt.push_collection_item();
     report!("experiment", "weight_scale");
 
-    rust_road_router::experiments::chpot::run(path, |_graph, _rng, travel_time| {
+    rust_road_router::experiments::a_star::run(path, |_graph, _rng, travel_time| {
         for weight in travel_time.iter_mut() {
             *weight = (*weight as f64 * 1.05) as Weight;
         }

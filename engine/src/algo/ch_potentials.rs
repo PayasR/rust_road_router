@@ -1,12 +1,15 @@
 use super::*;
 use crate::{
-    algo::customizable_contraction_hierarchy::{query::stepped_elimination_tree::SteppedEliminationTree, *},
+    algo::{
+        customizable_contraction_hierarchy::{query::stepped_elimination_tree::SteppedEliminationTree, *},
+        dijkstra::generic_dijkstra::*,
+    },
     datastr::{node_order::*, timestamped_vector::TimestampedVector},
+    report::*,
     util::in_range_option::InRangeOption,
 };
 
 pub mod query;
-pub mod td_query;
 
 pub trait Potential {
     fn init(&mut self, target: NodeId);
@@ -69,9 +72,7 @@ impl<'a> Potential for CCHPotential<'a> {
         }
 
         while let Some(node) = self.stack.pop() {
-            let min_by_up = self
-                .forward_cch_graph
-                .neighbor_iter(node)
+            let min_by_up = LinkIterable::<Link>::link_iter(&self.forward_cch_graph, node)
                 .map(|edge| edge.weight + self.potentials[edge.node as usize].value().unwrap())
                 .min()
                 .unwrap_or(INFINITY);
@@ -92,12 +93,11 @@ impl<'a> Potential for CCHPotential<'a> {
     }
 }
 
-#[derive(Debug)]
 pub struct CHPotential {
     order: NodeOrder,
     potentials: TimestampedVector<InRangeOption<Weight>>,
     forward: OwnedGraph,
-    backward_dijkstra: SteppedDijkstra<OwnedGraph>,
+    backward_dijkstra: StandardDijkstra<OwnedGraph>,
     num_pot_evals: usize,
 }
 
@@ -108,7 +108,7 @@ impl CHPotential {
             order,
             potentials: TimestampedVector::new(n, InRangeOption::new(None)),
             forward,
-            backward_dijkstra: SteppedDijkstra::new(backward),
+            backward_dijkstra: StandardDijkstra::new(backward),
             num_pot_evals: 0,
         }
     }
@@ -116,7 +116,7 @@ impl CHPotential {
     fn potential_internal(
         potentials: &mut TimestampedVector<InRangeOption<Weight>>,
         forward: &OwnedGraph,
-        backward: &SteppedDijkstra<OwnedGraph>,
+        backward: &StandardDijkstra<OwnedGraph>,
         node: NodeId,
         num_pot_evals: &mut usize,
     ) -> Weight {
@@ -125,13 +125,12 @@ impl CHPotential {
         }
         *num_pot_evals += 1;
 
-        let min_by_up = forward
-            .neighbor_iter(node)
+        let min_by_up = LinkIterable::<Link>::link_iter(forward, node)
             .map(|edge| edge.weight + Self::potential_internal(potentials, forward, backward, edge.node, num_pot_evals))
             .min()
             .unwrap_or(INFINITY);
 
-        potentials[node as usize] = InRangeOption::new(Some(std::cmp::min(backward.tentative_distance(node), min_by_up)));
+        potentials[node as usize] = InRangeOption::new(Some(std::cmp::min(*backward.tentative_distance(node), min_by_up)));
 
         potentials[node as usize].value().unwrap()
     }
@@ -145,7 +144,7 @@ impl Potential for CHPotential {
             from: self.order.rank(target),
             to: std::u32::MAX,
         });
-        while let QueryProgress::Settled(_) = self.backward_dijkstra.next_step() {}
+        while let Some(_) = self.backward_dijkstra.next() {}
     }
 
     fn potential(&mut self, node: NodeId) -> Option<Weight> {
@@ -193,5 +192,87 @@ impl<P: Potential> Potential for TurnExpandedPotential<P> {
     }
     fn num_pot_evals(&self) -> usize {
         self.potential.num_pot_evals()
+    }
+}
+
+pub struct BaselinePotential {
+    dijkstra: StandardDijkstra<OwnedGraph>,
+    num_pot_evals: usize,
+}
+
+impl BaselinePotential {
+    pub fn new<G>(graph: &G) -> Self
+    where
+        OwnedGraph: BuildReversed<G>,
+    {
+        Self {
+            dijkstra: StandardDijkstra::new(OwnedGraph::reversed(&graph)),
+            num_pot_evals: 0,
+        }
+    }
+}
+
+impl Potential for BaselinePotential {
+    fn init(&mut self, target: NodeId) {
+        self.num_pot_evals = 0;
+        report_time_with_key("BaselinePotential init", "baseline_pot_init", || {
+            self.dijkstra.initialize_query(Query {
+                from: target,
+                to: self.dijkstra.graph().num_nodes() as NodeId,
+            });
+            while let Some(_) = self.dijkstra.next() {}
+        })
+    }
+
+    fn potential(&mut self, node: NodeId) -> Option<Weight> {
+        if *self.dijkstra.tentative_distance(node) < INFINITY {
+            Some(*self.dijkstra.tentative_distance(node))
+        } else {
+            None
+        }
+    }
+
+    fn num_pot_evals(&self) -> usize {
+        self.num_pot_evals
+    }
+}
+
+#[derive(Debug)]
+pub struct RecyclingPotential<Potential> {
+    potential: Potential,
+    target: Option<NodeId>,
+}
+
+impl<P> RecyclingPotential<P> {
+    pub fn new(potential: P) -> Self {
+        Self { potential, target: None }
+    }
+}
+
+impl<P: Potential> Potential for RecyclingPotential<P> {
+    fn init(&mut self, target: NodeId) {
+        if self.target != Some(target) {
+            self.potential.init(target);
+            self.target = Some(target);
+        }
+    }
+    fn potential(&mut self, node: NodeId) -> Option<Weight> {
+        self.potential.potential(node)
+    }
+    fn num_pot_evals(&self) -> usize {
+        self.potential.num_pot_evals()
+    }
+}
+
+#[derive(Debug)]
+pub struct ZeroPotential();
+
+impl Potential for ZeroPotential {
+    fn init(&mut self, _target: NodeId) {}
+    fn potential(&mut self, _node: NodeId) -> Option<Weight> {
+        Some(0)
+    }
+    fn num_pot_evals(&self) -> usize {
+        0
     }
 }

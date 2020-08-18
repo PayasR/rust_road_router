@@ -3,10 +3,7 @@
 use std::{env, error::Error, path::Path};
 
 use rust_road_router::{
-    algo::{
-        dijkstra::{stepped_dijkstra::*, *},
-        Query,
-    },
+    algo::{dijkstra::generic_dijkstra::*, Query},
     cli::CliErr,
     datastr::graph::*,
     io::Load,
@@ -57,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" class=\"node\" />",
                 lng[node], lat[node], lng[node], lat[node]
             );
-            for link in graph.neighbor_iter(node as NodeId) {
+            for link in LinkIterable::<Link>::link_iter(&graph, node as NodeId) {
                 if in_bounding_box(link.node as usize) {
                     println!(
                         "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" class=\"arc\" />",
@@ -69,14 +66,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("</g>");
 
-    let mut dijkstra = SteppedDijkstra::new(graph.clone());
+    let mut dijkstra = StandardDijkstra::new(graph.clone());
     dijkstra.initialize_query(Query {
         from: start_node as NodeId,
         to: std::u32::MAX,
     });
 
     let mut counter = 0;
-    while let QueryProgress::Settled(State { node, .. }) = dijkstra.next_step() {
+    for node in dijkstra {
         if counter > 500 {
             break;
         }
@@ -91,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" class=\"node\" />",
                 lng[node as usize], lat[node as usize], lng[node as usize], lat[node as usize]
             );
-            for link in graph.neighbor_iter(node) {
+            for link in LinkIterable::<Link>::link_iter(&graph, node) {
                 if in_bounding_box(link.node as usize) {
                     println!(
                         "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" class=\"arc\" />",

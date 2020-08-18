@@ -1,8 +1,8 @@
 //! Building blocks for fast routing algorithms.
 
-use crate::datastr::graph::*;
+use crate::datastr::{graph::*, node_order::NodeOrder};
 
-use self::dijkstra::{stepped_dijkstra::SteppedDijkstra, QueryProgress, State};
+use self::dijkstra::{QueryProgress, State};
 
 pub mod catchup;
 pub mod ch_potentials;
@@ -12,11 +12,34 @@ pub mod dijkstra;
 pub mod time_dependent_sampling;
 pub mod topocore;
 
+pub trait GenQuery<Label> {
+    fn from(&self) -> NodeId;
+    fn to(&self) -> NodeId;
+    fn initial_state(&self) -> Label;
+    fn permutate(&mut self, order: &NodeOrder);
+}
+
 /// Simply a source-target pair
 #[derive(Debug, Clone, Copy)]
 pub struct Query {
     pub from: NodeId,
     pub to: NodeId,
+}
+
+impl GenQuery<Weight> for Query {
+    fn from(&self) -> NodeId {
+        self.from
+    }
+    fn to(&self) -> NodeId {
+        self.to
+    }
+    fn initial_state(&self) -> Weight {
+        0
+    }
+    fn permutate(&mut self, order: &NodeOrder) {
+        self.from = order.rank(self.from);
+        self.to = order.rank(self.to);
+    }
 }
 
 /// A source-target pair with a departure time.
@@ -26,6 +49,22 @@ pub struct TDQuery<T: Copy> {
     pub from: NodeId,
     pub to: NodeId,
     pub departure: T,
+}
+
+impl<T: Copy> GenQuery<T> for TDQuery<T> {
+    fn from(&self) -> NodeId {
+        self.from
+    }
+    fn to(&self) -> NodeId {
+        self.to
+    }
+    fn initial_state(&self) -> T {
+        self.departure
+    }
+    fn permutate(&mut self, order: &NodeOrder) {
+        self.from = order.rank(self.from);
+        self.to = order.rank(self.to);
+    }
 }
 
 /// Generic container for query results.

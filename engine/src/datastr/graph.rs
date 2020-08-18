@@ -10,7 +10,7 @@ pub mod floating_time_dependent;
 pub mod link_id_to_tail_mapper;
 pub mod time_dependent;
 
-pub use self::first_out_graph::{FirstOutGraph, OwnedGraph};
+pub use self::first_out_graph::{FirstOutGraph, OwnedGraph, UnweightedFirstOutGraph, UnweightedOwnedGraph};
 
 /// Node ids are 32bit unsigned ints
 pub type NodeId = u32;
@@ -22,12 +22,30 @@ pub type Weight = u32;
 /// Set to `u32::MAX / 2` so that `INFINITY + x` for `x <= INFINITY` does not overflow.
 pub const INFINITY: Weight = std::u32::MAX / 2;
 
+pub trait Arc {
+    fn head(&self) -> NodeId;
+}
+
 /// Simple struct for weighted links.
 /// No behaviour, just a pure data struct.
 #[derive(Debug, Copy, Clone)]
 pub struct Link {
     pub node: NodeId,
     pub weight: Weight,
+}
+
+impl Arc for Link {
+    #[inline(always)]
+    fn head(&self) -> NodeId {
+        self.node
+    }
+}
+
+impl Arc for (NodeId, EdgeId) {
+    #[inline(always)]
+    fn head(&self) -> NodeId {
+        self.0
+    }
 }
 
 /// Base trait for graphs.
@@ -38,34 +56,24 @@ pub trait Graph {
     fn degree(&self, node: NodeId) -> usize;
 }
 
-/// Trait for graph data structures which allow iterating over outgoing links of a node.
-pub trait LinkIterGraph<'a>: Graph {
+pub trait LinkIterable<'a, Link>: Graph {
     /// Type of the outgoing neighbor iterator.
-    /// Currently fixed to Links, but this could be generalized relatively easily
-    /// (though it would be difficult to specify bounds on the Link type, because currently we can't
-    /// extract associated types from higher ranked trait bounds. Concrete types work fine though).
-    /// Whats less easy is the lifetime bound, which currently has to come from a lifetime param of the trait.
-    /// This can be fixed once we have GATs https://github.com/rust-lang/rfcs/pull/1598
     type Iter: Iterator<Item = Link> + 'a;
 
     /// Get a iterator over the outgoing links of the given node.
-    fn neighbor_iter(&'a self, node: NodeId) -> Self::Iter;
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter;
+}
 
-    /// Create a new graph with all edges reversed
-    fn reverse(&'a self) -> OwnedGraph {
-        // vector of adjacency lists for the reverse graph
-        let mut reversed: Vec<Vec<Link>> = (0..self.num_nodes()).map(|_| Vec::<Link>::new()).collect();
+pub trait MutLinkIterable<'a, Link>: Graph {
+    /// Type of the outgoing neighbor iterator.
+    type Iter: Iterator<Item = Link> + 'a;
 
-        // iterate over all edges and insert them in the reversed structure
-        for node in 0..(self.num_nodes() as NodeId) {
-            for Link { node: neighbor, weight } in self.neighbor_iter(node) {
-                reversed[neighbor as usize].push(Link { node, weight });
-            }
-        }
+    /// Get a iterator over the outgoing links of the given node.
+    fn link_iter_mut(&'a mut self, node: NodeId) -> Self::Iter;
+}
 
-        OwnedGraph::from_adjancecy_lists(reversed)
-    }
-
+/// Trait for graph data structures which allow iterating over outgoing links of a node.
+pub trait LinkIterGraph<'a>: LinkIterable<'a, Link> {
     /// Split the graph in an upward graph of outgoing edges and a
     /// downward graph of incoming edges based on the node order passed.
     fn ch_split(&'a self, order: &NodeOrder) -> (OwnedGraph, OwnedGraph) {
@@ -74,7 +82,7 @@ pub trait LinkIterGraph<'a>: Graph {
 
         // iterate over all edges and insert them in the reversed structure
         for node in 0..(self.num_nodes() as NodeId) {
-            for Link { node: neighbor, weight } in self.neighbor_iter(node) {
+            for Link { node: neighbor, weight } in self.link_iter(node) {
                 if order.rank(node) < order.rank(neighbor) {
                     up[node as usize].push(Link { node: neighbor, weight });
                 } else {
@@ -85,51 +93,24 @@ pub trait LinkIterGraph<'a>: Graph {
 
         (OwnedGraph::from_adjancecy_lists(up), OwnedGraph::from_adjancecy_lists(down))
     }
-
-    /// Build an isomorph graph with node ids permutated according to the given order.
-    fn permute_node_ids(&'a self, order: &NodeOrder) -> OwnedGraph {
-        let mut first_out: Vec<EdgeId> = Vec::with_capacity(self.num_nodes() + 1);
-        first_out.push(0);
-        let mut head = Vec::with_capacity(self.num_arcs());
-        let mut weight = Vec::with_capacity(self.num_arcs());
-
-        for &node in order.order() {
-            first_out.push(first_out.last().unwrap() + self.degree(node) as NodeId);
-            let mut links = self.neighbor_iter(node).collect::<Vec<_>>();
-            links.sort_unstable_by_key(|l| order.rank(l.node));
-
-            for link in links {
-                head.push(order.rank(link.node));
-                weight.push(link.weight);
-            }
-        }
-
-        OwnedGraph::new(first_out, head, weight)
-    }
 }
 
-/// Trait for graph data structures which allow iterating over outgoing links of a node and modifying the weights of those links.
-pub trait MutWeightLinkIterGraph<'a>: Graph {
-    /// Type of the outgoing neighbor iterator.
-    type Iter: Iterator<Item = (&'a NodeId, &'a mut Weight)> + 'a;
-    /// Get a iterator with mutable weights over the outgoing links of the given node.
-    fn mut_weight_link_iter(&'a mut self, node: NodeId) -> Self::Iter;
-}
+impl<'a, G: for<'b> LinkIterable<'b, Link>> LinkIterGraph<'a> for G {}
 
 /// Utility function for preprocessing graphs with parallel edges.
 /// Will ensure, that all parallel edges have the lowest weight.
 /// Currently used to preprocess OSM graphs before CCH customization
 /// because the respecting will not necessarily use the parallel edge with the lowest weight.
-pub fn unify_parallel_edges<G: for<'a> MutWeightLinkIterGraph<'a>>(graph: &mut G) {
+pub fn unify_parallel_edges<G: for<'a> MutLinkIterable<'a, (&'a NodeId, &'a mut Weight)>>(graph: &mut G) {
     let mut weight_cache = vec![INFINITY; graph.num_nodes()];
     for node in 0..graph.num_nodes() {
-        for (&node, weight) in graph.mut_weight_link_iter(node as NodeId) {
+        for (&node, weight) in graph.link_iter_mut(node as NodeId) {
             weight_cache[node as usize] = std::cmp::min(weight_cache[node as usize], *weight);
         }
-        for (&node, weight) in graph.mut_weight_link_iter(node as NodeId) {
+        for (&node, weight) in graph.link_iter_mut(node as NodeId) {
             *weight = weight_cache[node as usize];
         }
-        for (&node, _weight) in graph.mut_weight_link_iter(node as NodeId) {
+        for (&node, _weight) in graph.link_iter_mut(node as NodeId) {
             weight_cache[node as usize] = INFINITY;
         }
     }
@@ -145,6 +126,7 @@ pub trait RandomLinkAccessGraph: Graph {
     fn neighbor_edge_indices(&self, node: NodeId) -> Range<EdgeId>;
 
     /// Get the range of edge ids which make up the outgoing edges of `node` as a `Range<usize>`
+    #[inline(always)]
     fn neighbor_edge_indices_usize(&self, node: NodeId) -> Range<usize> {
         let range = self.neighbor_edge_indices(node);
         Range {
@@ -176,5 +158,55 @@ pub trait RandomLinkAccessGraph: Graph {
         }
 
         OwnedGraph::new(first_out, head, weight)
+    }
+}
+
+/// Generic Trait for building reversed graphs.
+/// Type setup similar to `FromIter` for `std::iter::collect`.
+pub trait BuildReversed<G> {
+    /// Create a new graph with all edges reversed
+    fn reversed(graph: &G) -> Self;
+}
+
+/// Generic Trait for building permutated graphs.
+/// Type setup similar to `FromIter` for `std::iter::collect`.
+pub trait BuildPermutated<G>: Sized {
+    /// Build an isomorph graph with node ids permutated according to the given order.
+    fn permutated(graph: &G, order: &NodeOrder) -> Self {
+        Self::permutated_filtered(graph, order, Box::new(|_, _| true))
+    }
+
+    /// Build an isomorph graph with node ids permutated according to the given order while filtering out edges.
+    /// Predicate takes edges as NodeId pairs with NodeIds according to the permutated graph.
+    fn permutated_filtered(graph: &G, order: &NodeOrder, predicate: Box<dyn FnMut(NodeId, NodeId) -> bool>) -> Self;
+}
+
+pub struct InfinityFilteringGraph<G>(pub G);
+
+impl<G: Graph> Graph for InfinityFilteringGraph<G> {
+    fn degree(&self, node: NodeId) -> usize {
+        self.0.degree(node)
+    }
+    fn num_nodes(&self) -> usize {
+        self.0.num_nodes()
+    }
+    fn num_arcs(&self) -> usize {
+        self.0.num_arcs()
+    }
+}
+
+impl<'a, G: for<'b> LinkIterable<'b, Link>> LinkIterable<'a, Link> for InfinityFilteringGraph<G> {
+    type Iter = std::iter::Filter<<G as LinkIterable<'a, Link>>::Iter, fn(&Link) -> bool>;
+
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter {
+        self.0.link_iter(node).filter(|l| l.weight < INFINITY)
+    }
+}
+
+impl<'a, G: for<'b> LinkIterable<'b, Link>> LinkIterable<'a, NodeId> for InfinityFilteringGraph<G> {
+    type Iter = std::iter::Map<<Self as LinkIterable<'a, Link>>::Iter, fn(Link) -> NodeId>;
+
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter {
+        LinkIterable::<'a, Link>::link_iter(self, node).map(|l| l.node)
     }
 }

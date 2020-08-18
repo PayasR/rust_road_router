@@ -7,13 +7,14 @@
 use super::*;
 
 mod piecewise_linear_function;
-use self::piecewise_linear_function::*;
+pub use self::piecewise_linear_function::*;
 
 mod wrapping_range;
 pub use self::wrapping_range::*;
 
 mod graph;
 pub use self::graph::Graph as TDGraph;
+pub use self::graph::LiveTDGraph;
 
 mod geometry;
 use self::geometry::*;

@@ -45,9 +45,11 @@ impl Graph {
                 }
                 new_ipp_departure_time.extend(ipp_departure_time[range.clone()].iter().cloned());
                 new_ipp_travel_time.extend(ipp_travel_time[range.clone()].iter().cloned());
-                new_ipp_departure_time.push(int_period());
-                new_ipp_travel_time.push(ipp_travel_time[range.start]);
-                added += 1;
+                if *new_ipp_departure_time.last().unwrap() != int_period() {
+                    new_ipp_departure_time.push(int_period());
+                    new_ipp_travel_time.push(ipp_travel_time[range.start]);
+                    added += 1;
+                }
             } else {
                 new_ipp_departure_time.push(0);
                 new_ipp_travel_time.push(ipp_travel_time[range.start]);
@@ -145,15 +147,6 @@ impl GraphTrait for Graph {
     }
 }
 
-impl<'a> LinkIterGraph<'a> for Graph {
-    type Iter = std::iter::Map<std::slice::Iter<'a, NodeId>, fn(&NodeId) -> Link>;
-
-    fn neighbor_iter(&'a self, node: NodeId) -> Self::Iter {
-        let range = self.neighbor_edge_indices_usize(node);
-        self.head[range].iter().map(|&head| Link { node: head, weight: 0 })
-    }
-}
-
 impl RandomLinkAccessGraph for Graph {
     fn link(&self, edge_id: EdgeId) -> Link {
         Link {
@@ -163,14 +156,21 @@ impl RandomLinkAccessGraph for Graph {
     }
 
     fn edge_index(&self, from: NodeId, to: NodeId) -> Option<EdgeId> {
-        let first_out = self.first_out[from as usize] as usize;
-        self.neighbor_iter(from)
-            .enumerate()
-            .find(|&(_, Link { node, .. })| node == to)
-            .map(|(i, _)| (first_out + i) as EdgeId)
+        let first_out = self.first_out[from as usize];
+        let range = self.neighbor_edge_indices_usize(from);
+        self.head[range].iter().position(|&head| head == to).map(|pos| pos as EdgeId + first_out)
     }
 
     fn neighbor_edge_indices(&self, node: NodeId) -> Range<EdgeId> {
         (self.first_out[node as usize] as EdgeId)..(self.first_out[(node + 1) as usize] as EdgeId)
+    }
+}
+
+impl<'a> LinkIterable<'a, (NodeId, EdgeId)> for Graph {
+    type Iter = std::iter::Zip<std::iter::Cloned<std::slice::Iter<'a, NodeId>>, std::ops::Range<EdgeId>>;
+    #[inline(always)]
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter {
+        let range = self.neighbor_edge_indices_usize(node);
+        self.head[range].iter().cloned().zip(self.neighbor_edge_indices(node))
     }
 }

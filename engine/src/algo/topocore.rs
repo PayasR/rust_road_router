@@ -1,4 +1,5 @@
 use super::*;
+use crate::algo::dijkstra::gen_topo_dijkstra::{SymmetricDeg, SymmetricDegreeGraph};
 use crate::datastr::node_order::NodeOrder;
 use crate::datastr::rank_select_map::*;
 use crate::report::*;
@@ -33,16 +34,18 @@ impl<'a, G: Graph, H> Graph for UndirectedGraph<'a, G, H> {
     }
 }
 
-impl<'a, 'b, G: LinkIterGraph<'a>, H: LinkIterGraph<'a>> LinkIterGraph<'a> for UndirectedGraph<'b, G, H> {
+impl<'a, 'b, L, G: LinkIterable<'a, L>, H: LinkIterable<'a, L>> LinkIterable<'a, L> for UndirectedGraph<'b, G, H> {
     type Iter = std::iter::Chain<G::Iter, H::Iter>;
 
-    fn neighbor_iter(&'a self, node: NodeId) -> Self::Iter {
-        self.ins.neighbor_iter(node).chain(self.outs.neighbor_iter(node))
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter {
+        self.ins.link_iter(node).chain(self.outs.link_iter(node))
     }
 }
 
 #[allow(clippy::cognitive_complexity)]
-pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a>, ReorderSCC: Bool, Deg1: Bool, Deg2: Bool, Deg3: Bool>(graph: &Graph) -> Topocore {
+pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a> + for<'a> LinkIterable<'a, NodeId>, ReorderBCC: Bool, Deg1: Bool, Deg2: Bool, Deg3: Bool>(
+    graph: &Graph,
+) -> Topocore {
     let order = dfs_pre_order(graph);
 
     let n = graph.num_nodes();
@@ -55,8 +58,7 @@ pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a>, ReorderSCC: Bool, Deg1: 
     let mut outs: Vec<Vec<Link>> = (0..n)
         .map(|rank| {
             let node = order.node(rank as NodeId);
-            graph
-                .neighbor_iter(node)
+            LinkIterable::<Link>::link_iter(graph, node)
                 .filter(|&Link { node: head, .. }| head != node)
                 .map(|Link { node, weight }| Link {
                     node: order.rank(node),
@@ -67,12 +69,11 @@ pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a>, ReorderSCC: Bool, Deg1: 
                 .tap(|neighbors| neighbors.dedup_by(|a, b| a.node == b.node))
         })
         .collect();
-    let reversed = graph.reverse();
+    let reversed = OwnedGraph::reversed(graph);
     let mut ins: Vec<Vec<Link>> = (0..n)
         .map(|rank| {
             let node = order.node(rank as NodeId);
-            reversed
-                .neighbor_iter(node)
+            LinkIterable::<Link>::link_iter(&reversed, node)
                 .filter(|&Link { node: head, .. }| head != node)
                 .map(|Link { node, weight }| Link {
                     node: order.rank(node),
@@ -87,7 +88,7 @@ pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a>, ReorderSCC: Bool, Deg1: 
     let mut to_contract = BitVec::new(n);
     let mut queue = Vec::new();
 
-    if ReorderSCC::VALUE {
+    if ReorderBCC::VALUE {
         to_contract.set_all();
 
         let biggest = biconnected(&UndirectedGraph { ins: &reversed, outs: graph })
@@ -427,18 +428,18 @@ pub fn preprocess<'c, Graph: for<'a> LinkIterGraph<'a>, ReorderSCC: Bool, Deg1: 
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VirtualTopocore {
     pub order: NodeOrder,
-    biggest_scc: usize,
+    biggest_bcc: usize,
     deg2: usize,
     deg3: usize,
-    symmetric_degrees: Vec<u8>,
+    symmetric_degrees: std::rc::Rc<[u8]>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum NodeType {
-    OtherSCC(u8),
+    OtherBCC(u8),
     Deg2OrLess,
     Deg3,
     Deg4OrMore,
@@ -447,7 +448,7 @@ pub enum NodeType {
 impl NodeType {
     #[inline]
     pub fn in_core(&self) -> bool {
-        if let NodeType::OtherSCC(_) = self {
+        if let NodeType::OtherBCC(_) = self {
             false
         } else {
             true
@@ -463,28 +464,26 @@ impl VirtualTopocore {
             NodeType::Deg4OrMore
         } else if node < self.deg2 {
             NodeType::Deg3
-        } else if node < self.biggest_scc {
+        } else if node < self.biggest_bcc {
             NodeType::Deg2OrLess
         } else {
-            NodeType::OtherSCC(self.symmetric_degrees[node - self.biggest_scc])
+            NodeType::OtherBCC(self.symmetric_degrees[node - self.biggest_bcc])
         }
     }
 }
 
 #[allow(clippy::cognitive_complexity)]
-pub fn virtual_topocore<'c, Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> VirtualTopocore {
+pub fn virtual_topocore<'c, Graph: for<'a> LinkIterable<'a, NodeId>>(graph: &Graph) -> VirtualTopocore {
     let order = dfs_pre_order(graph);
     let n = graph.num_nodes();
 
-    let reversed = graph.reverse();
+    let reversed = UnweightedOwnedGraph::reversed(graph);
 
     let symmetric_degrees = (0..graph.num_nodes())
         .map(|node| {
             graph
-                .neighbor_iter(node as NodeId)
-                .chain(reversed.neighbor_iter(node as NodeId))
-                .filter(|l| l.weight < INFINITY)
-                .map(|l| l.node)
+                .link_iter(node as NodeId)
+                .chain(reversed.link_iter(node as NodeId))
                 .collect::<Vec<NodeId>>()
                 .tap(|neighbors| neighbors.sort_unstable())
                 .tap(|neighbors| neighbors.dedup())
@@ -497,20 +496,20 @@ pub fn virtual_topocore<'c, Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> 
         .max_by_key(|edges| edges.len())
         .unwrap();
 
-    let mut biggest_scc = BitVec::new(n);
+    let mut biggest_bcc = BitVec::new(n);
     for (u, v) in biggest {
-        biggest_scc.set(u as usize);
-        biggest_scc.set(v as usize);
+        biggest_bcc.set(u as usize);
+        biggest_bcc.set(v as usize);
     }
 
     let mut new_order = Vec::with_capacity(n);
 
-    let mut biggest_scc_size = 0;
+    let mut biggest_bcc_size = 0;
 
     for &node in order.order() {
-        if biggest_scc.get(node as usize) {
+        if biggest_bcc.get(node as usize) {
             new_order.push(node);
-            biggest_scc_size += 1;
+            biggest_bcc_size += 1;
         }
     }
     new_order.sort_by(|&n1, &n2| {
@@ -520,30 +519,118 @@ pub fn virtual_topocore<'c, Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> 
             symmetric_degrees[n2 as usize].cmp(&symmetric_degrees[n1 as usize])
         }
     });
-    let mut other_sccs_symmetric_degrees = Vec::with_capacity(n - biggest_scc_size);
+    let mut other_bccs_symmetric_degrees = Vec::with_capacity(n - biggest_bcc_size);
     for &node in order.order() {
-        if !biggest_scc.get(node as usize) {
+        if !biggest_bcc.get(node as usize) {
             new_order.push(node);
-            other_sccs_symmetric_degrees.push(symmetric_degrees[node as usize]);
+            other_bccs_symmetric_degrees.push(symmetric_degrees[node as usize]);
         }
     }
     let deg3 = new_order.iter().position(|&node| symmetric_degrees[node as usize] < 4).unwrap_or(n as usize);
     let deg2 = new_order.iter().position(|&node| symmetric_degrees[node as usize] < 3).unwrap_or(n as usize);
 
-    report!("biggest_scc_size", biggest_scc_size);
+    report!("biggest_bcc_size", biggest_bcc_size);
     report!("deg2", deg2);
     report!("deg3", deg3);
 
     VirtualTopocore {
         order: NodeOrder::from_node_order(new_order),
-        biggest_scc: biggest_scc_size,
+        biggest_bcc: biggest_bcc_size,
         deg3,
         deg2,
-        symmetric_degrees: other_sccs_symmetric_degrees,
+        symmetric_degrees: other_bccs_symmetric_degrees.into(),
     }
 }
 
-fn dfs_pre_order<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> NodeOrder {
+pub struct VirtualTopocoreGraph<G> {
+    pub graph: G,
+    virtual_topocore: VirtualTopocore,
+}
+
+impl<Graph> VirtualTopocoreGraph<Graph> {
+    pub fn new<G>(graph: &G) -> (Self, VirtualTopocore)
+    where
+        G: for<'a> LinkIterable<'a, NodeId>,
+        Graph: BuildPermutated<G>,
+    {
+        let topocore = virtual_topocore(graph);
+        (
+            VirtualTopocoreGraph {
+                graph: <Graph as BuildPermutated<G>>::permutated(&graph, &topocore.order),
+                virtual_topocore: topocore.clone(),
+            },
+            topocore,
+        )
+    }
+
+    pub fn new_topo_dijkstra_graphs<G>(graph: &G) -> (Self, Self, VirtualTopocore)
+    where
+        G: for<'a> LinkIterable<'a, NodeId>,
+        Graph: BuildPermutated<G>,
+    {
+        let topocore = virtual_topocore(graph);
+        (
+            VirtualTopocoreGraph {
+                graph: <Graph as BuildPermutated<G>>::permutated_filtered(&graph, &topocore.order, {
+                    let topocore = topocore.clone();
+                    Box::new(move |t, h| !topocore.node_type(t).in_core() || topocore.node_type(h).in_core())
+                }),
+                virtual_topocore: topocore.clone(),
+            },
+            VirtualTopocoreGraph {
+                graph: <Graph as BuildPermutated<G>>::permutated_filtered(&graph, &topocore.order, {
+                    let topocore = topocore.clone();
+                    Box::new(move |t, h| !(topocore.node_type(t).in_core() && topocore.node_type(h).in_core()))
+                }),
+                virtual_topocore: topocore.clone(),
+            },
+            topocore,
+        )
+    }
+}
+
+impl<G: Graph> Graph for VirtualTopocoreGraph<G> {
+    fn degree(&self, node: NodeId) -> usize {
+        self.graph.degree(node)
+    }
+    fn num_nodes(&self) -> usize {
+        self.graph.num_nodes()
+    }
+    fn num_arcs(&self) -> usize {
+        self.graph.num_arcs()
+    }
+}
+
+impl<'a, G: for<'b> LinkIterable<'b, L>, L> LinkIterable<'a, L> for VirtualTopocoreGraph<G> {
+    type Iter = <G as LinkIterable<'a, L>>::Iter;
+
+    #[inline(always)]
+    fn link_iter(&'a self, node: NodeId) -> Self::Iter {
+        self.graph.link_iter(node)
+    }
+}
+
+impl<G> SymmetricDegreeGraph for VirtualTopocoreGraph<G> {
+    #[inline(always)]
+    fn symmetric_degree(&self, node: NodeId) -> SymmetricDeg {
+        let node = node as usize;
+        if node < self.virtual_topocore.deg3 {
+            SymmetricDeg::GreaterEqFour
+        } else if node < self.virtual_topocore.deg2 {
+            SymmetricDeg::Three
+        } else if node < self.virtual_topocore.biggest_bcc {
+            SymmetricDeg::LessEqTwo
+        } else {
+            match self.virtual_topocore.symmetric_degrees[node - self.virtual_topocore.biggest_bcc].cmp(&3) {
+                std::cmp::Ordering::Equal => SymmetricDeg::Three,
+                std::cmp::Ordering::Greater => SymmetricDeg::GreaterEqFour,
+                std::cmp::Ordering::Less => SymmetricDeg::LessEqTwo,
+            }
+        }
+    }
+}
+
+fn dfs_pre_order<Graph: for<'a> LinkIterable<'a, NodeId>>(graph: &Graph) -> NodeOrder {
     let mut order = Vec::with_capacity(graph.num_nodes());
     dfs(graph, &mut |node| {
         order.push(node);
@@ -551,7 +638,7 @@ fn dfs_pre_order<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> NodeOrder {
     NodeOrder::from_node_order(order)
 }
 
-fn dfs<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph, visit: &mut impl FnMut(NodeId)) {
+fn dfs<Graph: for<'a> LinkIterable<'a, NodeId>>(graph: &Graph, visit: &mut impl FnMut(NodeId)) {
     let mut visited = BitVec::new(graph.num_nodes());
     let mut stack = Vec::new();
     for node in 0..graph.num_nodes() {
@@ -566,7 +653,7 @@ fn dfs<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph, visit: &mut impl FnMut(N
             visit(node);
             visited.set(node as usize);
 
-            for Link { node: head, .. } in graph.neighbor_iter(node) {
+            for head in graph.link_iter(node) {
                 if !visited.get(head as usize) {
                     stack.push(head);
                 }
@@ -575,7 +662,7 @@ fn dfs<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph, visit: &mut impl FnMut(N
     }
 }
 
-fn biconnected<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> Vec<Vec<(NodeId, NodeId)>> {
+fn biconnected<Graph: for<'a> LinkIterable<'a, NodeId>>(graph: &Graph) -> Vec<Vec<(NodeId, NodeId)>> {
     let mut stack = Vec::new();
 
     let mut dfs_num_counter = 0;
@@ -593,7 +680,7 @@ fn biconnected<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> Vec<Vec<(Node
         debug_assert!(edge_stack.is_empty());
         debug_assert!(stack.is_empty());
         dfs_parent[node] = node;
-        stack.push((node, graph.neighbor_iter(node as NodeId)));
+        stack.push((node, graph.link_iter(node as NodeId)));
 
         while let Some(&mut (node, ref mut neighbors)) = stack.last_mut() {
             if dfs_num[node].value().is_none() {
@@ -602,7 +689,7 @@ fn biconnected<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> Vec<Vec<(Node
                 dfs_num_counter += 1;
             }
 
-            if let Some(Link { node: neighbor, .. }) = neighbors.next() {
+            if let Some(neighbor) = neighbors.next() {
                 if let Some(neighbor_dfs_num) = dfs_num[neighbor as usize].value() {
                     if neighbor_dfs_num < dfs_num[node].value().unwrap() && (neighbor as usize) != dfs_parent[node] {
                         edge_stack.push((node as NodeId, neighbor));
@@ -611,7 +698,7 @@ fn biconnected<Graph: for<'a> LinkIterGraph<'a>>(graph: &Graph) -> Vec<Vec<(Node
                 } else {
                     dfs_parent[neighbor as usize] = node;
                     edge_stack.push((node as NodeId, neighbor));
-                    stack.push((neighbor as usize, graph.neighbor_iter(neighbor)));
+                    stack.push((neighbor as usize, graph.link_iter(neighbor)));
                 }
             } else {
                 stack.pop();

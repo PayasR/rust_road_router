@@ -1,67 +1,59 @@
 use super::*;
-use crate::algo::dijkstra::td_stepped_dijkstra::TDSteppedDijkstra;
+use crate::algo::dijkstra::generic_dijkstra::*;
 use crate::datastr::graph::time_dependent::*;
-use crate::report::*;
 
-#[derive(Debug)]
-pub struct Server {
-    dijkstra: TDSteppedDijkstra,
-}
+pub struct TDDijkstraOps();
 
-impl Server {
-    pub fn new(graph: TDGraph) -> Server {
-        Server {
-            dijkstra: TDSteppedDijkstra::new(graph),
-        }
+impl DijkstraOps<TDGraph> for TDDijkstraOps {
+    type Label = Weight;
+    type LinkResult = Weight;
+    type Arc = (NodeId, EdgeId);
+
+    #[inline(always)]
+    fn link(&mut self, graph: &TDGraph, label: &Weight, link: &Self::Arc) -> Self::LinkResult {
+        label + graph.travel_time_function(link.1).eval(*label)
     }
 
-    fn distance(&mut self, from: NodeId, to: NodeId, departure: Timestamp) -> Option<Weight> {
-        report!("algo", "TD Dijkstra Query");
-
-        self.dijkstra.initialize_query(TDQuery { from, to, departure });
-
-        loop {
-            match self.dijkstra.next_step(|_| true, |_| Some(0)) {
-                QueryProgress::Settled(_) => continue,
-                QueryProgress::Done(result) => return result,
-            }
+    #[inline(always)]
+    fn merge(&mut self, label: &mut Weight, linked: Self::LinkResult) -> bool {
+        if linked < *label {
+            *label = linked;
+            return true;
         }
-    }
-
-    fn path(&self) -> Vec<(NodeId, Weight)> {
-        let mut path = Vec::new();
-        path.push((
-            self.dijkstra.query().to,
-            self.dijkstra.tentative_distance(self.dijkstra.query().to) - self.dijkstra.query().departure,
-        ));
-
-        while path.last().unwrap().0 != self.dijkstra.query().from {
-            let next = self.dijkstra.predecessor(path.last().unwrap().0);
-            let t = self.dijkstra.tentative_distance(next) - self.dijkstra.query().departure;
-            path.push((next, t));
-        }
-
-        path.reverse();
-
-        path
+        false
     }
 }
 
-pub struct PathServerWrapper<'s>(&'s Server);
-
-impl<'s> PathServer for PathServerWrapper<'s> {
-    type NodeInfo = (NodeId, Weight);
-
-    fn path(&mut self) -> Vec<Self::NodeInfo> {
-        Server::path(self.0)
+impl Default for TDDijkstraOps {
+    fn default() -> Self {
+        Self {}
     }
 }
 
-impl<'s> TDQueryServer<'s, Timestamp, Weight> for Server {
-    type P = PathServerWrapper<'s>;
+pub struct LiveTDDijkstraOps();
 
-    fn query(&'s mut self, query: TDQuery<Timestamp>) -> Option<QueryResult<Self::P, Weight>> {
-        self.distance(query.from, query.to, query.departure)
-            .map(move |distance| QueryResult::new(distance, PathServerWrapper(self)))
+impl DijkstraOps<LiveTDGraph> for LiveTDDijkstraOps {
+    type Label = Weight;
+    type LinkResult = Weight;
+    type Arc = (NodeId, EdgeId);
+
+    #[inline(always)]
+    fn link(&mut self, graph: &LiveTDGraph, label: &Weight, link: &Self::Arc) -> Self::LinkResult {
+        label + graph.eval(link.1, *label)
+    }
+
+    #[inline(always)]
+    fn merge(&mut self, label: &mut Weight, linked: Self::LinkResult) -> bool {
+        if linked < *label {
+            *label = linked;
+            return true;
+        }
+        false
+    }
+}
+
+impl Default for LiveTDDijkstraOps {
+    fn default() -> Self {
+        Self {}
     }
 }

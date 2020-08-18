@@ -1,12 +1,12 @@
 #[macro_use]
 extern crate rust_road_router;
-use rust_road_router::{cli::CliErr, datastr::graph::*, report::*};
+use rust_road_router::{cli::CliErr, report::*};
 use std::{env, error::Error, path::Path};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let _reporter = enable_reporting();
 
-    report!("program", "chpot_simple_scale");
+    report!("program", "chpot_unmodified");
     report!("start_time", format!("{}", time::now_utc().rfc822()));
     report!("args", env::args().collect::<Vec<String>>());
 
@@ -18,15 +18,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut exps_ctxt = push_collection_context("experiments".to_string());
 
     let _exp_ctx = exps_ctxt.push_collection_item();
-    report!("experiment", "weight_scale");
+    report!("experiment", "perfect");
 
-    rust_road_router::experiments::chpot::run(path, |_graph, _rng, travel_time| {
-        for weight in travel_time.iter_mut() {
-            *weight = (*weight as f64 * 1.05) as Weight;
-        }
-
-        Ok(())
-    })?;
+    rust_road_router::experiments::chpot::run(path, |_graph, _rng, _travel_time| Ok(()))?;
 
     Ok(())
 }

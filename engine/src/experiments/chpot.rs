@@ -3,7 +3,7 @@ use crate::algo::customizable_contraction_hierarchy::*;
 use crate::{
     algo::{
         ch_potentials::{query::Server as TopoServer, *},
-        dijkstra::query::dijkstra::Server as DijkServer,
+        dijkstra::{generic_dijkstra::DefaultOps, query::dijkstra::Server as DijkServer},
         *,
     },
     datastr::{graph::*, node_order::NodeOrder},
@@ -33,9 +33,9 @@ pub fn run(
     let first_out = Vec::<NodeId>::load_from(path.join("first_out"))?;
     let head = Vec::<EdgeId>::load_from(path.join("head"))?;
     let mut travel_time = Vec::<EdgeId>::load_from(path.join("travel_time"))?;
-    #[cfg(feature = "chpot_visualize")]
+    #[cfg(feature = "chpot-visualize")]
     let lat = Vec::<f32>::load_from(path.join("latitude"))?;
-    #[cfg(feature = "chpot_visualize")]
+    #[cfg(feature = "chpot-visualize")]
     let lng = Vec::<f32>::load_from(path.join("longitude"))?;
     let mut modified_travel_time = travel_time.clone();
 
@@ -76,39 +76,58 @@ pub fn run(
     };
 
     let potential = {
-        #[cfg(feature = "chpot-cch")]
+        #[cfg(feature = "chpot-only-topo")]
         {
-            let _potential_ctxt = algo_runs_ctxt.push_collection_item();
-            CCHPotential::new(&cch, &graph)
+            ZeroPotential()
         }
-        #[cfg(not(feature = "chpot-cch"))]
+        #[cfg(not(feature = "chpot-only-topo"))]
         {
-            let forward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/forward_first_out"))?;
-            let forward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/forward_head"))?;
-            let forward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/forward_weight"))?;
-            let backward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/backward_first_out"))?;
-            let backward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/backward_head"))?;
-            let backward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/backward_weight"))?;
-            let order = NodeOrder::from_node_order(Vec::<NodeId>::load_from(path.join("lower_bound_ch/order"))?);
-            CHPotential::new(
-                OwnedGraph::new(forward_first_out, forward_head, forward_weight),
-                OwnedGraph::new(backward_first_out, backward_head, backward_weight),
-                order,
-            )
+            #[cfg(feature = "chpot-cch")]
+            {
+                let _potential_ctxt = algo_runs_ctxt.push_collection_item();
+                CCHPotential::new(&cch, &graph)
+            }
+            #[cfg(not(feature = "chpot-cch"))]
+            {
+                let forward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/forward_first_out"))?;
+                let forward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/forward_head"))?;
+                let forward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/forward_weight"))?;
+                let backward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/backward_first_out"))?;
+                let backward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/backward_head"))?;
+                let backward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/backward_weight"))?;
+                let order = NodeOrder::from_node_order(Vec::<NodeId>::load_from(path.join("lower_bound_ch/order"))?);
+                CHPotential::new(
+                    OwnedGraph::new(forward_first_out, forward_head, forward_weight),
+                    OwnedGraph::new(backward_first_out, backward_head, backward_weight),
+                    order,
+                )
+            }
+        }
+    };
+    let potential = {
+        #[cfg(feature = "chpot-oracle")]
+        {
+            RecyclingPotential::new(potential)
+        }
+        #[cfg(not(feature = "chpot-oracle"))]
+        {
+            potential
         }
     };
 
     let virtual_topocore_ctxt = algo_runs_ctxt.push_collection_item();
-    let mut topocore = {
-        #[cfg(feature = "chpot_visualize")]
+    let infinity_filtered_graph = InfinityFilteringGraph(modified_graph);
+    let mut topocore: TopoServer<_, _, OwnedGraph> = {
+        #[cfg(feature = "chpot-visualize")]
         {
-            TopoServer::new(modified_graph.clone(), potential, &lat, &lng)
+            TopoServer::new(&infinity_filtered_graph, potential, DefaultOps::default(), &lat, &lng)
         }
-        #[cfg(not(feature = "chpot_visualize"))]
+        #[cfg(not(feature = "chpot-visualize"))]
         {
-            TopoServer::new(modified_graph.clone(), potential)
+            TopoServer::new(&infinity_filtered_graph, potential, DefaultOps::default())
         }
     };
+    let InfinityFilteringGraph(modified_graph) = infinity_filtered_graph;
     drop(virtual_topocore_ctxt);
 
     let mut query_count = 0;
@@ -119,12 +138,17 @@ pub fn run(
         let from: NodeId = rng.gen_range(0, graph.num_nodes() as NodeId);
         let to: NodeId = rng.gen_range(0, graph.num_nodes() as NodeId);
 
+        #[cfg(feature = "chpot-oracle")]
+        {
+            QueryServer::query(&mut topocore, Query { from, to });
+        }
+
         report!("from", from);
         report!("to", to);
 
         query_count += 1;
 
-        let (mut res, time) = measure(|| topocore.query(Query { from, to }));
+        let (mut res, time) = measure(|| QueryServer::query(&mut topocore, Query { from, to }));
         report!("running_time_ms", time.to_std().unwrap().as_nanos() as f64 / 1_000_000.0);
         let dist = res.as_ref().map(|res| res.distance());
         report!("result", dist);
@@ -138,7 +162,7 @@ pub fn run(
         eprintln!("Avg. query time {}", total_query_time / (query_count as i32))
     };
 
-    let mut server = DijkServer::new(modified_graph);
+    let mut server = DijkServer::<DefaultOps, _, _>::new(modified_graph);
 
     for _i in 0..super::NUM_DIJKSTRA_QUERIES {
         let _query_ctxt = algo_runs_ctxt.push_collection_item();
@@ -150,7 +174,7 @@ pub fn run(
 
         query_count += 1;
 
-        let (res, time) = measure(|| server.query(Query { from, to }));
+        let (res, time) = measure(|| QueryServer::query(&mut server, Query { from, to }));
         report!("running_time_ms", time.to_std().unwrap().as_nanos() as f64 / 1_000_000.0);
         let dist = res.as_ref().map(|res| res.distance());
         report!("result", dist);

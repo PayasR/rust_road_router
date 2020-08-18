@@ -5,7 +5,7 @@ use rust_road_router::algo::customizable_contraction_hierarchy::*;
 use rust_road_router::{
     algo::{
         ch_potentials::{query::Server as TopoServer, *},
-        dijkstra::query::dijkstra::Server as DijkServer,
+        dijkstra::{generic_dijkstra::DefaultOps, query::dijkstra::Server as DijkServer},
         *,
     },
     cli::CliErr,
@@ -66,51 +66,58 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let potential = {
-        #[cfg(feature = "chpot-cch")]
+        #[cfg(feature = "chpot-only-topo")]
         {
-            let _potential_ctxt = algo_runs_ctxt.push_collection_item();
-            CCHPotential::new(&cch, &graph)
+            ZeroPotential()
         }
-        #[cfg(not(feature = "chpot-cch"))]
+        #[cfg(not(feature = "chpot-only-topo"))]
         {
-            let forward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/forward_first_out"))?;
-            let forward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/forward_head"))?;
-            let forward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/forward_weight"))?;
-            let backward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/backward_first_out"))?;
-            let backward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/backward_head"))?;
-            let backward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/backward_weight"))?;
-            let order = NodeOrder::from_node_order(Vec::<NodeId>::load_from(path.join("lower_bound_ch/order"))?);
-            CHPotential::new(
-                OwnedGraph::new(forward_first_out, forward_head, forward_weight),
-                OwnedGraph::new(backward_first_out, backward_head, backward_weight),
-                order,
-            )
+            #[cfg(feature = "chpot-cch")]
+            {
+                let _potential_ctxt = algo_runs_ctxt.push_collection_item();
+                CCHPotential::new(&cch, &graph)
+            }
+            #[cfg(not(feature = "chpot-cch"))]
+            {
+                let forward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/forward_first_out"))?;
+                let forward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/forward_head"))?;
+                let forward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/forward_weight"))?;
+                let backward_first_out = Vec::<EdgeId>::load_from(path.join("lower_bound_ch/backward_first_out"))?;
+                let backward_head = Vec::<NodeId>::load_from(path.join("lower_bound_ch/backward_head"))?;
+                let backward_weight = Vec::<Weight>::load_from(path.join("lower_bound_ch/backward_weight"))?;
+                let order = NodeOrder::from_node_order(Vec::<NodeId>::load_from(path.join("lower_bound_ch/order"))?);
+                CHPotential::new(
+                    OwnedGraph::new(forward_first_out, forward_head, forward_weight),
+                    OwnedGraph::new(backward_first_out, backward_head, backward_weight),
+                    order,
+                )
+            }
         }
     };
 
     let virtual_topocore_ctxt = algo_runs_ctxt.push_collection_item();
-    let mut topocore = {
+    let mut topocore: TopoServer<_, _, OwnedGraph> = {
         #[cfg(feature = "chpot_visualize")]
         {
-            TopoServer::new(modified_graph, potential, &lat, &lng)
+            TopoServer::new(&modified_graph, potential, DefaultOps::default(), &lat, &lng)
         }
         #[cfg(not(feature = "chpot_visualize"))]
         {
-            TopoServer::new(modified_graph, potential)
+            TopoServer::new(&modified_graph, potential, DefaultOps::default())
         }
     };
     drop(virtual_topocore_ctxt);
 
     let n = graph.num_nodes();
 
-    let mut server = DijkServer::new(graph);
+    let mut server = DijkServer::<DefaultOps, _, _>::new(graph);
 
     for _i in 0..rust_road_router::experiments::NUM_DIJKSTRA_QUERIES {
         let from: NodeId = rng.gen_range(0, n as NodeId);
 
         server.ranks(from, |to, _dist, rank| {
             let _query_ctxt = algo_runs_ctxt.push_collection_item();
-            let (mut res, time) = measure(|| topocore.query(Query { from, to }));
+            let (mut res, time) = measure(|| QueryServer::query(&mut topocore, Query { from, to }));
 
             report!("from", from);
             report!("to", to);

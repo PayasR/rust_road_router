@@ -63,10 +63,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     found += 1;
                     let edge_idx = edge_idx as usize;
 
-                    // TODO by day
                     let speeds: Vec<u32> = records
-                        .skip(60 / 5 * 24 * 2)
-                        .take(60 / 5 * 24)
+                        // .skip(60 / 5 * 24 * 2)
+                        // .take(60 / 5 * 24)
                         .map(|s| s.parse::<u32>())
                         .collect::<Result<Vec<_>, _>>()?;
 
@@ -88,13 +87,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .iter()
                         .enumerate()
                         .map(|(i, speed)| (i as Timestamp * 1000 * 60 * 5, 100 * 36 * geo_distance[edge_idx] / speed))
+                        .map(|(i, tt)| (i, std::cmp::max(tt, travel_time[edge_idx])))
                         .collect();
                     tts.dedup_by_key(|&mut (_, tt)| tt);
                     tts.push((num_buckets * 1000 * 60 * 5, tts.first().unwrap().1));
                     let mut profile: Vec<_> = tts
                         .windows(2)
                         .flat_map(|points| {
-                            if points[1].0 > points[0].1 && points[1].0 - points[0].1 > points[0].0 {
+                            if points[0].1 != points[1].1 && points[1].0 > points[0].1 && points[1].0 - points[0].1 > points[0].0 {
                                 vec![points[0], (points[1].0 - points[0].1, points[0].1)]
                             } else {
                                 vec![points[0]]

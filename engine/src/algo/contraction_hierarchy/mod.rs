@@ -4,7 +4,7 @@
 //! No node ordering implemented yet, depends on getting a precalculated order.
 
 use super::*;
-use crate::algo::dijkstra::stepped_dijkstra::Trash;
+use crate::algo::dijkstra::generic_dijkstra::*;
 use crate::datastr::node_order::NodeOrder;
 
 pub mod query;
@@ -111,7 +111,7 @@ impl ContractionGraph {
         let nodes = {
             let outs = (0..n).map(|node| {
                 graph
-                    .neighbor_iter(order.node(node as NodeId))
+                    .link_iter(order.node(node as NodeId))
                     .filter(|&Link { node: head, .. }| head != order.node(node as NodeId))
                     .map(|Link { node, weight }| {
                         (
@@ -124,10 +124,9 @@ impl ContractionGraph {
                     })
                     .collect()
             });
-            let reversed = graph.reverse();
+            let reversed = OwnedGraph::reversed(graph);
             let ins = (0..n).map(|node| {
-                reversed
-                    .neighbor_iter(order.node(node as NodeId))
+                LinkIterable::<Link>::link_iter(&reversed, order.node(node as NodeId))
                     .filter(|&Link { node: head, .. }| head != order.node(node as NodeId))
                     .map(|Link { node, weight }| {
                         (
@@ -164,8 +163,8 @@ impl ContractionGraph {
         let mut graph = self.partial_graph();
         // witness search servers with recycling for reduced allocations
         let mut recycled = (
-            SteppedDijkstra::new(ForwardWrapper { graph: &graph }).recycle(),
-            SteppedDijkstra::new(BackwardWrapper { graph: &graph }).recycle(),
+            StandardDijkstra::new(ForwardWrapper { graph: &graph }).recycle(),
+            StandardDijkstra::new(BackwardWrapper { graph: &graph }).recycle(),
         );
 
         // split of the lowest node, the one that will be contracted
@@ -266,7 +265,13 @@ impl<'a> PartialContractionGraph<'a> {
         out_result
     }
 
-    fn shortcut_required(&self, from: NodeId, to: NodeId, shortcut_weight: Weight, recycled: (Trash, Trash)) -> (bool, (Trash, Trash)) {
+    fn shortcut_required(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        shortcut_weight: Weight,
+        recycled: (Trash<Weight>, Trash<Weight>),
+    ) -> (bool, (Trash<Weight>, Trash<Weight>)) {
         // no loop shortcuts ever required
         if from == to {
             return (false, recycled);
@@ -274,8 +279,8 @@ impl<'a> PartialContractionGraph<'a> {
 
         // create server from recycled stuff
         let mut server = crate::algo::dijkstra::query::bidirectional_dijkstra::Server {
-            forward_dijkstra: SteppedDijkstra::from_recycled(ForwardWrapper { graph: &self }, recycled.0),
-            backward_dijkstra: SteppedDijkstra::from_recycled(BackwardWrapper { graph: &self }, recycled.1),
+            forward_dijkstra: StandardDijkstra::from_recycled(ForwardWrapper { graph: &self }, recycled.0),
+            backward_dijkstra: StandardDijkstra::from_recycled(BackwardWrapper { graph: &self }, recycled.1),
             tentative_distance: INFINITY,
             meeting_node: 0,
         };
@@ -367,10 +372,10 @@ impl<'a> Iterator for LinkMappingIterator<'a> {
     }
 }
 
-impl<'a, 'b> LinkIterGraph<'b> for ForwardWrapper<'a> {
+impl<'a, 'b> LinkIterable<'b, Link> for ForwardWrapper<'a> {
     type Iter = LinkMappingIterator<'b>;
 
-    fn neighbor_iter(&'b self, node: NodeId) -> Self::Iter {
+    fn link_iter(&'b self, node: NodeId) -> Self::Iter {
         LinkMappingIterator {
             iter: self.graph.nodes[node as usize].outgoing.iter(),
             offset: self.graph.id_offset,
@@ -378,10 +383,10 @@ impl<'a, 'b> LinkIterGraph<'b> for ForwardWrapper<'a> {
     }
 }
 
-impl<'a, 'b> LinkIterGraph<'b> for BackwardWrapper<'a> {
+impl<'a, 'b> LinkIterable<'b, Link> for BackwardWrapper<'a> {
     type Iter = LinkMappingIterator<'b>;
 
-    fn neighbor_iter(&'b self, node: NodeId) -> Self::Iter {
+    fn link_iter(&'b self, node: NodeId) -> Self::Iter {
         LinkMappingIterator {
             iter: self.graph.nodes[node as usize].incoming.iter(),
             offset: self.graph.id_offset,
